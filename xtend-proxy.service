@@ -1,0 +1,25 @@
+[Unit]
+Description=Intergas Xtend HTTP Proxy
+After=network-online.target xtend-connect.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/intergas-xtend-proxy
+EnvironmentFile=/opt/intergas-xtend-proxy/.env
+ExecStart=/usr/bin/env bash /opt/intergas-xtend-proxy/xtend-proxy.sh
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/intergas-xtend-proxy
+
+[Install]
+WantedBy=multi-user.target

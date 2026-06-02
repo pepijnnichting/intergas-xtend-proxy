@@ -1,0 +1,28 @@
+[Unit]
+Description=Xtend WiFi Auto Connect
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+User=pi
+
+ExecStart=/usr/bin/env bash /opt/intergas-xtend-proxy/xtend-connect.sh
+
+WorkingDirectory=/opt/intergas-xtend-proxy
+
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
