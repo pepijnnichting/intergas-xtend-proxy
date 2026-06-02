@@ -13,6 +13,24 @@ WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASSWORD="${WIFI_PASSWORD:-}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
 FORCE="false"
+WIFI_SSID_SET="false"
+WIFI_PASSWORD_SET="false"
+CHECK_INTERVAL_SET="false"
+EXISTING_WIFI_SSID=""
+EXISTING_WIFI_PASSWORD=""
+EXISTING_CHECK_INTERVAL=""
+
+if [[ -n "$WIFI_SSID" ]]; then
+    WIFI_SSID_SET="true"
+fi
+
+if [[ -n "$WIFI_PASSWORD" ]]; then
+    WIFI_PASSWORD_SET="true"
+fi
+
+if [[ -n "${CHECK_INTERVAL:-}" ]]; then
+    CHECK_INTERVAL_SET="true"
+fi
 
 usage() {
     cat <<'EOF'
@@ -42,19 +60,32 @@ die() {
     exit 1
 }
 
+read_env_value() {
+    local key="$1"
+
+    if [[ ! -f "$ENV_FILE" ]]; then
+        return 0
+    fi
+
+    awk -F= -v key="$key" '$1 == key {print substr($0, index($0, "=") + 1)}' "$ENV_FILE" | tail -n1
+}
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --ssid)
                 WIFI_SSID="${2:-}"
+                WIFI_SSID_SET="true"
                 shift 2
                 ;;
             --password)
                 WIFI_PASSWORD="${2:-}"
+                WIFI_PASSWORD_SET="true"
                 shift 2
                 ;;
             --check-interval)
                 CHECK_INTERVAL="${2:-}"
+                CHECK_INTERVAL_SET="true"
                 shift 2
                 ;;
             --force)
@@ -107,6 +138,32 @@ install_files() {
     install -m 0644 "$INSTALL_DIR/xtend-connect.service" "$SYSTEMD_DIR/xtend-connect.service"
 }
 
+load_existing_env_defaults() {
+    if [[ ! -f "$ENV_FILE" ]]; then
+        return
+    fi
+
+    EXISTING_WIFI_SSID="$(read_env_value WIFI_SSID)"
+    EXISTING_WIFI_PASSWORD="$(read_env_value WIFI_PASSWORD)"
+    EXISTING_CHECK_INTERVAL="$(read_env_value CHECK_INTERVAL)"
+
+    if [[ "$WIFI_SSID_SET" != "true" && -n "$EXISTING_WIFI_SSID" ]]; then
+        WIFI_SSID="$EXISTING_WIFI_SSID"
+    fi
+
+    if [[ "$WIFI_PASSWORD_SET" != "true" && -n "$EXISTING_WIFI_PASSWORD" ]]; then
+        WIFI_PASSWORD="$EXISTING_WIFI_PASSWORD"
+    fi
+
+    if [[ "$CHECK_INTERVAL_SET" != "true" ]] \
+        && [[ -n "$EXISTING_CHECK_INTERVAL" ]] \
+        && [[ "$EXISTING_CHECK_INTERVAL" =~ ^[0-9]+$ ]]; then
+        CHECK_INTERVAL="$EXISTING_CHECK_INTERVAL"
+    fi
+
+    log INFO "Loaded existing values from $ENV_FILE"
+}
+
 write_env_file() {
     local overwrite
 
@@ -122,6 +179,15 @@ write_env_file() {
     [[ -n "$WIFI_SSID" ]] || die "WIFI_SSID is required"
     [[ -n "$WIFI_PASSWORD" ]] || die "WIFI_PASSWORD is required"
     [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || die "CHECK_INTERVAL must be a number"
+
+    if [[ -f "$ENV_FILE" && "$FORCE" != "true" ]]; then
+        if [[ "$WIFI_SSID" == "$EXISTING_WIFI_SSID" ]] \
+            && [[ "$WIFI_PASSWORD" == "$EXISTING_WIFI_PASSWORD" ]] \
+            && [[ "$CHECK_INTERVAL" == "$EXISTING_CHECK_INTERVAL" ]]; then
+            log INFO "Existing $ENV_FILE already matches requested values"
+            return
+        fi
+    fi
 
     overwrite="yes"
     if [[ -f "$ENV_FILE" && "$FORCE" != "true" ]]; then
@@ -188,6 +254,7 @@ main() {
     require_root
     install_packages
     install_files
+    load_existing_env_defaults
     write_env_file
     configure_nginx
     enable_services
