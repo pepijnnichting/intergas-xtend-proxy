@@ -11,6 +11,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 
 LOG_TAG="wifi-monitor"
 CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
+WIFI_INTERFACE="${WIFI_INTERFACE:-}"
 
 ################################################################################
 # Helpers
@@ -32,6 +33,14 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
+require_command() {
+    local cmd="$1"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        log ERROR "Required command not found: $cmd"
+        exit 1
+    fi
+}
+
 ################################################################################
 # Load environment
 ################################################################################
@@ -49,13 +58,58 @@ set +a
 : "${WIFI_SSID:?WIFI_SSID is required in .env}"
 : "${WIFI_PASSWORD:?WIFI_PASSWORD is required in .env}"
 
+if [[ ! "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$CHECK_INTERVAL" -lt 5 ]]; then
+    log ERROR "CHECK_INTERVAL must be a number >= 5"
+    exit 1
+fi
+
+require_command nmcli
+require_command awk
+
+################################################################################
+# Interface/network manager setup
+################################################################################
+
+wait_for_network_manager() {
+    local tries=0
+    local max_tries=30
+
+    while (( tries < max_tries )); do
+        if nmcli -t -f RUNNING general status | grep -qi '^running$'; then
+            return 0
+        fi
+        ((tries += 1))
+        sleep 1
+    done
+
+    log ERROR "NetworkManager did not become ready in time"
+    return 1
+}
+
+detect_wifi_interface() {
+    if [[ -n "$WIFI_INTERFACE" ]]; then
+        if ! nmcli -t -f DEVICE,TYPE device status | awk -F: -v dev="$WIFI_INTERFACE" '$1==dev && $2=="wifi" {found=1} END {exit(found?0:1)}'; then
+            log ERROR "Configured WIFI_INTERFACE '$WIFI_INTERFACE' is not a known Wi-Fi device"
+            return 1
+        fi
+        return 0
+    fi
+
+    WIFI_INTERFACE="$(nmcli -t -f DEVICE,TYPE device status | awk -F: '$2=="wifi" {print $1; exit}')"
+
+    if [[ -z "$WIFI_INTERFACE" ]]; then
+        log ERROR "No Wi-Fi interface found"
+        return 1
+    fi
+}
+
 ################################################################################
 # Functions
 ################################################################################
 
 get_current_ssid() {
-    LC_ALL=C nmcli -t -f NAME,TYPE connection show --active \
-        | awk -F: '$2=="802-11-wireless" {print $1; exit}'
+    LC_ALL=C nmcli -t -f ACTIVE,SSID device wifi list ifname "$WIFI_INTERFACE" \
+        | awk -F: '$1=="yes" {print $2; exit}'
 }
 
 wifi_connected() {
@@ -65,12 +119,17 @@ wifi_connected() {
 
 connect_wifi() {
 
-    log INFO "Attempting connection to '$WIFI_SSID'"
+    log INFO "Attempting connection to '$WIFI_SSID' via '$WIFI_INTERFACE'"
 
-    # Remove broken/stale connection profiles if they exist
-    nmcli connection delete "$WIFI_SSID" >/dev/null 2>&1 || true
+    # Prefer an existing connection profile when present.
+    if nmcli --wait 10 connection up "$WIFI_SSID" ifname "$WIFI_INTERFACE" >/dev/null 2>&1; then
+        log INFO "Connected using existing profile '$WIFI_SSID'"
+        return 0
+    fi
 
-    if nmcli device wifi connect "$WIFI_SSID" password "$WIFI_PASSWORD"; then
+    nmcli device wifi rescan ifname "$WIFI_INTERFACE" >/dev/null 2>&1 || true
+
+    if nmcli --wait 15 device wifi connect "$WIFI_SSID" password "$WIFI_PASSWORD" ifname "$WIFI_INTERFACE"; then
         log INFO "Successfully connected to '$WIFI_SSID'"
         return 0
     fi
@@ -78,7 +137,7 @@ connect_wifi() {
     log ERROR "Connection attempt failed"
 
     log INFO "Available WiFi networks:"
-    nmcli --colors no device wifi list
+    nmcli --colors no device wifi list ifname "$WIFI_INTERFACE"
 
     return 1
 }
@@ -89,6 +148,9 @@ connect_wifi() {
 
 log INFO "Starting wifi monitor"
 log INFO "Target SSID: '$WIFI_SSID'"
+wait_for_network_manager
+detect_wifi_interface
+log INFO "Wi-Fi interface: '$WIFI_INTERFACE'"
 log INFO "Check interval: ${CHECK_INTERVAL}s"
 
 LAST_STATE="unknown"

@@ -94,6 +94,9 @@ Maak `/opt/intergas-xtend-proxy/.env`:
 WIFI_SSID=Xtend_xxxxxxxxxx
 WIFI_PASSWORD=je_xtend_wachtwoord
 
+# Optioneel: forceer wifi interface (bijv. wlan0)
+# WIFI_INTERFACE=wlan0
+
 # Optioneel voor connect-script
 CHECK_INTERVAL=60
 ```
