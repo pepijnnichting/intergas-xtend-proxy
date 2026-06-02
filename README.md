@@ -1,5 +1,8 @@
 # Intergas Xtend Raspberry Pi Proxy
 
+Companion project voor de Intergas Xtend Home Assistant integratie:
+https://github.com/pepijnnichting/intergas-xtend
+
 Deze map bevat een praktische bridge-opzet voor gebruik met Home Assistant:
 
 - De Raspberry Pi verbindt via wifi met de Intergas Xtend AP.
