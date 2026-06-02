@@ -10,27 +10,79 @@ Zo kun je in de Intergas Xtend-integratie het IP-adres van de Pi invullen.
 
 ## Bestanden
 
+- `install.sh`: installeert alles automatisch (aanbevolen).
 - `xtend-connect.sh`: houdt de wifi-verbinding met de Xtend AP in stand.
 - `xtend-connect.service`: systemd-service voor wifi auto-reconnect.
-- `xtend-proxy.sh`: HTTP reverse proxy voor de Xtend API.
-- `xtend-proxy.service`: systemd-service voor de proxy.
+- `xtend-proxy.nginx.conf`: nginx reverse proxy config.
 
 ## Vereisten op de Pi
 
 - Raspberry Pi OS (of andere Linux met `systemd`)
-- `python3`
-- `NetworkManager` + `nmcli` (voor `xtend-connect.sh`)
+- sudo rechten
 
-## 1. Plaats de scripts op de Pi
+## Snelle installatie (aanbevolen)
+
+Run op de Raspberry Pi in deze map:
+
+```sh
+chmod +x install.sh
+sudo ./install.sh --ssid "Xtend_xxxxxxxxxx" --password "je_xtend_wachtwoord"
+```
+
+Dit script doet automatisch:
+
+- Installeert `nginx` en `network-manager` (`nmcli`)
+- Kopieert bestanden naar `/opt/intergas-xtend-proxy`
+- Maakt `/opt/intergas-xtend-proxy/.env`
+- Installeert `xtend-connect.service`
+- Activeert nginx config en herlaadt nginx
+- Start en enabled `nginx` + `xtend-connect.service`
+
+Optionele vlaggen:
+
+```sh
+sudo ./install.sh --ssid "Xtend_xxxxxxxxxx" --password "..." --check-interval 60 --force
+```
+
+## Handmatige installatie
+
+Als je liever handmatig doet:
+
+Installeer nginx:
+
+```sh
+sudo apt update
+sudo apt install -y nginx
+```
+
+Plaats de config:
+
+```sh
+sudo cp /opt/intergas-xtend-proxy/xtend-proxy.nginx.conf /etc/nginx/sites-available/xtend-proxy
+sudo ln -sf /etc/nginx/sites-available/xtend-proxy /etc/nginx/sites-enabled/xtend-proxy
+sudo rm -f /etc/nginx/sites-enabled/default
+```
+
+Controleer en herstart nginx:
+
+```sh
+sudo nginx -t
+sudo systemctl enable --now nginx
+sudo systemctl reload nginx
+```
+
+Hiermee luistert de proxy op poort `8080` en forwardt alleen `/api/stats/values` naar `10.20.30.1:80`.
+
+## 1. Plaats de bestanden op de Pi
 
 Voorbeeldlocatie:
 
 ```sh
 sudo mkdir -p /opt/intergas-xtend-proxy
-sudo cp xtend-*.sh xtend-*.service /opt/intergas-xtend-proxy/
+sudo cp install.sh xtend-connect.sh xtend-connect.service xtend-proxy.nginx.conf /opt/intergas-xtend-proxy/
 sudo chown -R pi:pi /opt/intergas-xtend-proxy
 cd /opt/intergas-xtend-proxy
-chmod +x xtend-connect.sh xtend-proxy.sh
+chmod +x install.sh xtend-connect.sh
 ```
 
 ## 2. Maak `.env` aan
@@ -42,36 +94,25 @@ Maak `/opt/intergas-xtend-proxy/.env`:
 WIFI_SSID=Xtend_xxxxxxxxxx
 WIFI_PASSWORD=je_xtend_wachtwoord
 
-# Proxy luistert op LAN van de Pi
-LISTEN_HOST=0.0.0.0
-LISTEN_PORT=8080
-
-# Xtend endpoint (standaard)
-XTEND_HOST=10.20.30.1
-XTEND_PORT=80
-ALLOWED_PATH=/api/stats/values
-
 # Optioneel voor connect-script
 CHECK_INTERVAL=60
 ```
 
-## 3. Installeer services
+## 3. Installeer alleen de wifi-service
 
 Kopieer unit files:
 
 ```sh
 sudo cp /opt/intergas-xtend-proxy/xtend-connect.service /etc/systemd/system/
-sudo cp /opt/intergas-xtend-proxy/xtend-proxy.service /etc/systemd/system/
 ```
 
-Pas in beide unit files eventueel `User=` en paden aan als je een andere locatie gebruikt.
+Pas eventueel `User=` en paden aan als je een andere locatie gebruikt.
 
-Herlaad systemd en start:
+Herlaad systemd en start wifi auto-reconnect:
 
 ```sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now xtend-connect.service
-sudo systemctl enable --now xtend-proxy.service
 ```
 
 ## 4. Controle
@@ -99,7 +140,7 @@ curl "http://<PI_IP>:8080/healthz"
 In de Intergas Xtend-integratie:
 
 - Host: `<PI_IP>`
-- Poort: `8080` (of jouw `LISTEN_PORT`)
+- Poort: `8080`
 
 Daarna gaat Home Assistant via de Pi naar de Xtend.
 
@@ -107,11 +148,11 @@ Daarna gaat Home Assistant via de Pi naar de Xtend.
 
 ```sh
 journalctl -u xtend-connect.service -f
-journalctl -u xtend-proxy.service -f
+journalctl -u nginx -f
 ```
 
 Als de proxy niet bereikbaar is:
 
 - Controleer firewall op de Pi (poort 8080 open op LAN).
 - Controleer of Pi wifi daadwerkelijk op Xtend SSID zit.
-- Controleer of `XTEND_HOST=10.20.30.1` bereikbaar is vanaf de Pi.
+- Controleer of `10.20.30.1` bereikbaar is vanaf de Pi.
