@@ -100,6 +100,9 @@ WIFI_PASSWORD=je_xtend_wachtwoord
 # Optioneel: forceer wifi interface (bijv. wlan0)
 # WIFI_INTERFACE=wlan0
 
+# Optioneel: Xtend host (default 10.20.30.1)
+# XTEND_HOST=10.20.30.1
+
 # Optioneel voor connect-script
 CHECK_INTERVAL=60
 ```
@@ -132,7 +135,7 @@ ip -4 addr show
 Test vanaf je Home Assistant-machine of een andere host op je LAN:
 
 ```sh
-curl "http://<PI_IP>:8080/api/stats/values?fields=0001"
+curl "http://<PI_IP>:8080/api/stats/values?fields=79b3"
 ```
 
 Health endpoint:

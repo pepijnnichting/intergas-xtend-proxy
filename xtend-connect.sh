@@ -12,6 +12,7 @@ ENV_FILE="$SCRIPT_DIR/.env"
 LOG_TAG="wifi-monitor"
 CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
 WIFI_INTERFACE="${WIFI_INTERFACE:-}"
+XTEND_HOST="${XTEND_HOST:-10.20.30.1}"
 
 ################################################################################
 # Helpers
@@ -65,6 +66,8 @@ fi
 
 require_command nmcli
 require_command awk
+require_command ip
+require_command ping
 
 ################################################################################
 # Interface/network manager setup
@@ -117,6 +120,14 @@ wifi_connected() {
     [[ "$current_ssid" == "$WIFI_SSID" ]]
 }
 
+has_route_to_xtend() {
+    ip route get "$XTEND_HOST" oif "$WIFI_INTERFACE" >/dev/null 2>&1
+}
+
+xtend_reachable() {
+    ping -c 1 -W 2 -I "$WIFI_INTERFACE" "$XTEND_HOST" >/dev/null 2>&1
+}
+
 connect_wifi() {
 
     log INFO "Attempting connection to '$WIFI_SSID' via '$WIFI_INTERFACE'"
@@ -151,6 +162,7 @@ log INFO "Target SSID: '$WIFI_SSID'"
 wait_for_network_manager
 detect_wifi_interface
 log INFO "Wi-Fi interface: '$WIFI_INTERFACE'"
+log INFO "Xtend host: '$XTEND_HOST'"
 log INFO "Check interval: ${CHECK_INTERVAL}s"
 
 LAST_STATE="unknown"
@@ -166,6 +178,14 @@ while true; do
     fi
 
     if wifi_connected "$CURRENT_SSID"; then
+
+        if ! has_route_to_xtend || ! xtend_reachable; then
+            log WARN "Connected to '$WIFI_SSID' but '$XTEND_HOST' is unreachable; reconnecting"
+            LAST_STATE="disconnected"
+            connect_wifi || true
+            sleep "$CHECK_INTERVAL"
+            continue
+        fi
 
         if [[ "$LAST_STATE" != "connected" ]]; then
             log INFO "Connected to '$WIFI_SSID'"

@@ -227,7 +227,7 @@ Next steps:
 
 2) Test the proxy from your LAN:
    curl "http://<PI_IP>:8080/healthz"
-   curl "http://<PI_IP>:8080/api/stats/values?fields=0001"
+    curl "http://<PI_IP>:8080/api/stats/values?fields=79b3"
 
 3) In Home Assistant Intergas Xtend integration:
    Host: <PI_IP>
