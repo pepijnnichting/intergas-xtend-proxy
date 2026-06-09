@@ -117,13 +117,6 @@ install_packages() {
 }
 
 install_files() {
-    local service_user
-
-    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-        service_user="$SUDO_USER"
-    else
-        service_user="pi"
-    fi
 
     log INFO "Installing files to $INSTALL_DIR"
     install -d -m 0755 "$INSTALL_DIR"
@@ -131,9 +124,6 @@ install_files() {
     install -m 0755 "$SCRIPT_DIR/xtend-connect.sh" "$INSTALL_DIR/xtend-connect.sh"
     install -m 0644 "$SCRIPT_DIR/xtend-connect.service" "$INSTALL_DIR/xtend-connect.service"
     install -m 0644 "$SCRIPT_DIR/xtend-proxy.nginx.conf" "$INSTALL_DIR/xtend-proxy.nginx.conf"
-
-    # Make the service run as the invoking sudo user by default.
-    sed -i.bak "s/^User=.*/User=${service_user}/" "$INSTALL_DIR/xtend-connect.service"
 
     install -m 0644 "$INSTALL_DIR/xtend-connect.service" "$SYSTEMD_DIR/xtend-connect.service"
 }

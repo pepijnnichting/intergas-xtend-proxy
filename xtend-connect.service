@@ -5,7 +5,7 @@ Wants=NetworkManager.service network-online.target
 
 [Service]
 Type=simple
-User=pi
+User=root
 
 ExecStart=/usr/bin/env bash /opt/intergas-xtend-proxy/xtend-connect.sh
 
