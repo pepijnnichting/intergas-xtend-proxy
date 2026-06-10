@@ -74,7 +74,7 @@ sudo systemctl enable --now nginx
 sudo systemctl reload nginx
 ```
 
-Hiermee luistert de proxy op poort `8080` en forwardt alleen `/api/stats/values` naar `10.20.30.1:80`.
+Hiermee luistert de proxy op poort `8080` en forwardt zowel de API als de webinterface naar `10.20.30.1:80`.
 
 ## 1. Plaats de bestanden op de Pi
 
@@ -136,6 +136,12 @@ Test vanaf je Home Assistant-machine of een andere host op je LAN:
 
 ```sh
 curl "http://<PI_IP>:8080/api/stats/values?fields=79b3"
+```
+
+Open de Xtend webinterface via de proxy:
+
+```sh
+http://<PI_IP>:8080/
 ```
 
 Health endpoint:
