@@ -6,6 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
+RuntimeDirectory=intergas-xtend-proxy
+RuntimeDirectoryMode=0700
 
 ExecStart=/usr/bin/env bash /opt/intergas-xtend-proxy/xtend-connect.sh
 

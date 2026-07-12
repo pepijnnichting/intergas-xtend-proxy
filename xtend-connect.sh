@@ -108,7 +108,8 @@ detect_wifi_interface() {
 }
 
 configure_runtime_dir() {
-    install -d -m 0700 "$RUNTIME_DIR"
+    mkdir -p "$RUNTIME_DIR"
+    chmod 700 "$RUNTIME_DIR"
 }
 
 write_wpa_config() {
