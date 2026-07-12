@@ -153,6 +153,12 @@ connection_profile_uuid() {
     awk 'NF {print; exit}' <<<"$matches"
 }
 
+ssid_profile_uuids() {
+    nmcli -t -f NAME,UUID connection show | awk -F: -v ssid="$WIFI_SSID" '
+        $1 == ssid || index($1, ssid " ") == 1 {print $2}
+    '
+}
+
 delete_connection_profiles() {
     local connection_name="$1"
     local deleted=0
@@ -165,6 +171,37 @@ delete_connection_profiles() {
     done < <(connection_profile_uuids "$connection_name")
 
     return "$deleted"
+}
+
+delete_stale_ssid_profiles() {
+    local profile_uuid
+    local deleted=0
+
+    while IFS= read -r profile_uuid; do
+        [[ -n "$profile_uuid" ]] || continue
+        nmcli connection delete uuid "$profile_uuid" >/dev/null 2>&1 || true
+        deleted=1
+    done < <(ssid_profile_uuids)
+
+    return "$deleted"
+}
+
+activate_connection() {
+    local connection_name="$1"
+    local output
+
+    if output="$(nmcli --wait 20 connection up "$connection_name" ifname "$WIFI_INTERFACE" 2>&1)"; then
+        return 0
+    fi
+
+    if [[ -n "$output" ]]; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            log WARN "nmcli: $line"
+        done <<<"$output"
+    fi
+
+    return 1
 }
 
 ensure_wifi_profile() {
@@ -213,6 +250,7 @@ recreate_wifi_profile() {
     local connection_name="$1"
 
     delete_connection_profiles "$connection_name" || true
+    delete_stale_ssid_profiles || true
     ensure_wifi_profile "$connection_name"
 }
 
@@ -226,7 +264,7 @@ connect_wifi() {
     nmcli device wifi rescan ifname "$WIFI_INTERFACE" >/dev/null 2>&1 || true
 
     if ensure_wifi_profile "$connection_name" \
-        && nmcli --wait 20 connection up "$connection_name" ifname "$WIFI_INTERFACE" >/dev/null 2>&1; then
+        && activate_connection "$connection_name"; then
         log INFO "Connected using profile '$connection_name'"
         return 0
     fi
@@ -234,7 +272,7 @@ connect_wifi() {
     log WARN "Profile '$connection_name' failed; recreating it"
 
     if recreate_wifi_profile "$connection_name" \
-        && nmcli --wait 20 connection up "$connection_name" ifname "$WIFI_INTERFACE" >/dev/null 2>&1; then
+        && activate_connection "$connection_name"; then
         log INFO "Successfully connected to '$WIFI_SSID'"
         return 0
     fi
