@@ -56,6 +56,10 @@ wpa_pid_file() {
     printf '%s/wpa_supplicant-%s.pid' "$RUNTIME_DIR" "$WIFI_INTERFACE"
 }
 
+wpa_ctrl_socket() {
+    printf '%s/%s' "$RUNTIME_DIR" "$WIFI_INTERFACE"
+}
+
 ################################################################################
 # Load environment
 ################################################################################
@@ -118,7 +122,7 @@ write_wpa_config() {
     config_file="$(wpa_config_file)"
 
     {
-        printf 'ctrl_interface=/run/wpa_supplicant\n'
+        printf 'ctrl_interface=%s\n' "$RUNTIME_DIR"
         printf 'update_config=0\n'
         if [[ -n "$WIFI_COUNTRY" ]]; then
             printf 'country=%s\n' "$WIFI_COUNTRY"
@@ -156,8 +160,8 @@ stop_wpa_supplicant() {
 
     pid_file="$(wpa_pid_file)"
 
-    if [[ -S "/run/wpa_supplicant/$WIFI_INTERFACE" ]]; then
-        wpa_cli -i "$WIFI_INTERFACE" terminate >/dev/null 2>&1 || true
+    if [[ -S "$(wpa_ctrl_socket)" ]]; then
+        wpa_cli -p "$RUNTIME_DIR" -i "$WIFI_INTERFACE" terminate >/dev/null 2>&1 || true
     fi
 
     if [[ -f "$pid_file" ]]; then
@@ -197,7 +201,7 @@ start_wpa_supplicant() {
 wpa_status_field() {
     local field="$1"
 
-    wpa_cli -i "$WIFI_INTERFACE" status 2>/dev/null | awk -F= -v field="$field" '$1==field {print $2; exit}'
+    wpa_cli -p "$RUNTIME_DIR" -i "$WIFI_INTERFACE" status 2>/dev/null | awk -F= -v field="$field" '$1==field {print $2; exit}'
 }
 
 current_wpa_state() {
