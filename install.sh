@@ -11,14 +11,23 @@ ENV_FILE="$INSTALL_DIR/.env"
 
 WIFI_SSID="${WIFI_SSID:-}"
 WIFI_PASSWORD="${WIFI_PASSWORD:-}"
+WIFI_INTERFACE="${WIFI_INTERFACE:-}"
+WIFI_COUNTRY="${WIFI_COUNTRY:-}"
 CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
+XTEND_CLIENT_IP="${XTEND_CLIENT_IP:-10.20.30.2/24}"
 FORCE="false"
 WIFI_SSID_SET="false"
 WIFI_PASSWORD_SET="false"
+WIFI_INTERFACE_SET="false"
+WIFI_COUNTRY_SET="false"
 CHECK_INTERVAL_SET="false"
+XTEND_CLIENT_IP_SET="false"
 EXISTING_WIFI_SSID=""
 EXISTING_WIFI_PASSWORD=""
+EXISTING_WIFI_INTERFACE=""
+EXISTING_WIFI_COUNTRY=""
 EXISTING_CHECK_INTERVAL=""
+EXISTING_XTEND_CLIENT_IP=""
 
 if [[ -n "$WIFI_SSID" ]]; then
     WIFI_SSID_SET="true"
@@ -28,8 +37,20 @@ if [[ -n "$WIFI_PASSWORD" ]]; then
     WIFI_PASSWORD_SET="true"
 fi
 
+if [[ -n "$WIFI_INTERFACE" ]]; then
+    WIFI_INTERFACE_SET="true"
+fi
+
+if [[ -n "$WIFI_COUNTRY" ]]; then
+    WIFI_COUNTRY_SET="true"
+fi
+
 if [[ -n "${CHECK_INTERVAL:-}" ]]; then
     CHECK_INTERVAL_SET="true"
+fi
+
+if [[ -n "$XTEND_CLIENT_IP" ]]; then
+    XTEND_CLIENT_IP_SET="true"
 fi
 
 usage() {
@@ -40,12 +61,16 @@ Usage:
 Options:
   --ssid <name>           Xtend Wi-Fi SSID (e.g. Xtend_xxxxxxxxxx)
   --password <password>   Xtend Wi-Fi password
+    --interface <name>      Wi-Fi interface name (optional, e.g. wlan0)
+    --country <code>        Wi-Fi country code (optional, e.g. NL)
   --check-interval <sec>  Reconnect check interval in seconds (default: 60)
+    --client-ip <cidr>      Static IP on the Xtend subnet (default: 10.20.30.2/24)
   --force                 Overwrite existing .env without prompting
   -h, --help              Show this help
 
 Environment variables (alternative to flags):
-  WIFI_SSID, WIFI_PASSWORD, CHECK_INTERVAL
+    WIFI_SSID, WIFI_PASSWORD, WIFI_INTERFACE, WIFI_COUNTRY,
+    CHECK_INTERVAL, XTEND_CLIENT_IP
 EOF
 }
 
@@ -83,9 +108,24 @@ parse_args() {
                 WIFI_PASSWORD_SET="true"
                 shift 2
                 ;;
+            --interface)
+                WIFI_INTERFACE="${2:-}"
+                WIFI_INTERFACE_SET="true"
+                shift 2
+                ;;
+            --country)
+                WIFI_COUNTRY="${2:-}"
+                WIFI_COUNTRY_SET="true"
+                shift 2
+                ;;
             --check-interval)
                 CHECK_INTERVAL="${2:-}"
                 CHECK_INTERVAL_SET="true"
+                shift 2
+                ;;
+            --client-ip)
+                XTEND_CLIENT_IP="${2:-}"
+                XTEND_CLIENT_IP_SET="true"
                 shift 2
                 ;;
             --force)
@@ -110,10 +150,10 @@ require_root() {
 }
 
 install_packages() {
-    log INFO "Installing required packages (nginx, network-manager)"
+    log INFO "Installing required packages (nginx, wpasupplicant, iw)"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y nginx network-manager
+    apt-get install -y nginx wpasupplicant iw
 }
 
 install_files() {
@@ -135,7 +175,10 @@ load_existing_env_defaults() {
 
     EXISTING_WIFI_SSID="$(read_env_value WIFI_SSID)"
     EXISTING_WIFI_PASSWORD="$(read_env_value WIFI_PASSWORD)"
+    EXISTING_WIFI_INTERFACE="$(read_env_value WIFI_INTERFACE)"
+    EXISTING_WIFI_COUNTRY="$(read_env_value WIFI_COUNTRY)"
     EXISTING_CHECK_INTERVAL="$(read_env_value CHECK_INTERVAL)"
+    EXISTING_XTEND_CLIENT_IP="$(read_env_value XTEND_CLIENT_IP)"
 
     if [[ "$WIFI_SSID_SET" != "true" && -n "$EXISTING_WIFI_SSID" ]]; then
         WIFI_SSID="$EXISTING_WIFI_SSID"
@@ -145,10 +188,22 @@ load_existing_env_defaults() {
         WIFI_PASSWORD="$EXISTING_WIFI_PASSWORD"
     fi
 
+    if [[ "$WIFI_INTERFACE_SET" != "true" && -n "$EXISTING_WIFI_INTERFACE" ]]; then
+        WIFI_INTERFACE="$EXISTING_WIFI_INTERFACE"
+    fi
+
+    if [[ "$WIFI_COUNTRY_SET" != "true" && -n "$EXISTING_WIFI_COUNTRY" ]]; then
+        WIFI_COUNTRY="$EXISTING_WIFI_COUNTRY"
+    fi
+
     if [[ "$CHECK_INTERVAL_SET" != "true" ]] \
         && [[ -n "$EXISTING_CHECK_INTERVAL" ]] \
         && [[ "$EXISTING_CHECK_INTERVAL" =~ ^[0-9]+$ ]]; then
         CHECK_INTERVAL="$EXISTING_CHECK_INTERVAL"
+    fi
+
+    if [[ "$XTEND_CLIENT_IP_SET" != "true" ]] && [[ -n "$EXISTING_XTEND_CLIENT_IP" ]]; then
+        XTEND_CLIENT_IP="$EXISTING_XTEND_CLIENT_IP"
     fi
 
     log INFO "Loaded existing values from $ENV_FILE"
@@ -169,11 +224,15 @@ write_env_file() {
     [[ -n "$WIFI_SSID" ]] || die "WIFI_SSID is required"
     [[ -n "$WIFI_PASSWORD" ]] || die "WIFI_PASSWORD is required"
     [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || die "CHECK_INTERVAL must be a number"
+    [[ "$XTEND_CLIENT_IP" == */* ]] || die "XTEND_CLIENT_IP must be in CIDR form, e.g. 10.20.30.2/24"
 
     if [[ -f "$ENV_FILE" && "$FORCE" != "true" ]]; then
         if [[ "$WIFI_SSID" == "$EXISTING_WIFI_SSID" ]] \
             && [[ "$WIFI_PASSWORD" == "$EXISTING_WIFI_PASSWORD" ]] \
-            && [[ "$CHECK_INTERVAL" == "$EXISTING_CHECK_INTERVAL" ]]; then
+            && [[ "$WIFI_INTERFACE" == "$EXISTING_WIFI_INTERFACE" ]] \
+            && [[ "$WIFI_COUNTRY" == "$EXISTING_WIFI_COUNTRY" ]] \
+            && [[ "$CHECK_INTERVAL" == "$EXISTING_CHECK_INTERVAL" ]] \
+            && [[ "$XTEND_CLIENT_IP" == "$EXISTING_XTEND_CLIENT_IP" ]]; then
             log INFO "Existing $ENV_FILE already matches requested values"
             return
         fi
@@ -191,7 +250,14 @@ write_env_file() {
 WIFI_SSID=$WIFI_SSID
 WIFI_PASSWORD=$WIFI_PASSWORD
 CHECK_INTERVAL=$CHECK_INTERVAL
+XTEND_CLIENT_IP=$XTEND_CLIENT_IP
 EOF
+        if [[ -n "$WIFI_INTERFACE" ]]; then
+            printf 'WIFI_INTERFACE=%s\n' "$WIFI_INTERFACE" >>"$ENV_FILE"
+        fi
+        if [[ -n "$WIFI_COUNTRY" ]]; then
+            printf 'WIFI_COUNTRY=%s\n' "$WIFI_COUNTRY" >>"$ENV_FILE"
+        fi
         log INFO "Wrote $ENV_FILE"
     else
         log INFO "Keeping existing $ENV_FILE"

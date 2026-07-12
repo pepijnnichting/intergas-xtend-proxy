@@ -1,7 +1,7 @@
 [Unit]
 Description=Xtend WiFi Auto Connect
-After=NetworkManager.service network-online.target
-Wants=NetworkManager.service network-online.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple

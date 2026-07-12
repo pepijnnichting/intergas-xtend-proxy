@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
 set -Eeuo pipefail
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
 
 ################################################################################
 # Configuration
@@ -8,12 +11,13 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
+RUNTIME_DIR="/run/intergas-xtend-proxy"
 
-LOG_TAG="wifi-monitor"
 CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
 WIFI_INTERFACE="${WIFI_INTERFACE:-}"
+WIFI_COUNTRY="${WIFI_COUNTRY:-}"
 XTEND_HOST="${XTEND_HOST:-10.20.30.1}"
-
+XTEND_CLIENT_IP="${XTEND_CLIENT_IP:-10.20.30.2/24}"
 
 ################################################################################
 # Helpers
@@ -30,6 +34,7 @@ log() {
 }
 
 cleanup() {
+    stop_wpa_supplicant || true
     log INFO "Stopping wifi monitor"
 }
 
@@ -41,6 +46,14 @@ require_command() {
         log ERROR "Required command not found: $cmd"
         exit 1
     fi
+}
+
+wpa_config_file() {
+    printf '%s/wpa_supplicant-%s.conf' "$RUNTIME_DIR" "$WIFI_INTERFACE"
+}
+
+wpa_pid_file() {
+    printf '%s/wpa_supplicant-%s.pid' "$RUNTIME_DIR" "$WIFI_INTERFACE"
 }
 
 ################################################################################
@@ -65,45 +78,28 @@ if [[ ! "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$CHECK_INTERVAL" -lt 5 ]]; then
     exit 1
 fi
 
-require_command nmcli
 require_command awk
 require_command ip
+require_command iw
 require_command ping
-
-xtend_connection_name() {
-    printf 'intergas-xtend-%s' "$WIFI_INTERFACE"
-}
+require_command wpa_cli
+require_command wpa_passphrase
+require_command wpa_supplicant
 
 ################################################################################
-# Interface/network manager setup
+# Interface/wpa_supplicant setup
 ################################################################################
-
-wait_for_network_manager() {
-    local tries=0
-    local max_tries=30
-
-    while (( tries < max_tries )); do
-        if nmcli -t -f RUNNING general status | grep -qi '^running$'; then
-            return 0
-        fi
-        ((tries += 1))
-        sleep 1
-    done
-
-    log ERROR "NetworkManager did not become ready in time"
-    return 1
-}
 
 detect_wifi_interface() {
     if [[ -n "$WIFI_INTERFACE" ]]; then
-        if ! nmcli -t -f DEVICE,TYPE device status | awk -F: -v dev="$WIFI_INTERFACE" '$1==dev && $2=="wifi" {found=1} END {exit(found?0:1)}'; then
+        if ! iw dev "$WIFI_INTERFACE" info >/dev/null 2>&1; then
             log ERROR "Configured WIFI_INTERFACE '$WIFI_INTERFACE' is not a known Wi-Fi device"
             return 1
         fi
         return 0
     fi
 
-    WIFI_INTERFACE="$(nmcli -t -f DEVICE,TYPE device status | awk -F: '$2=="wifi" {print $1; exit}')"
+    WIFI_INTERFACE="$(iw dev | awk '$1=="Interface" {print $2; exit}')"
 
     if [[ -z "$WIFI_INTERFACE" ]]; then
         log ERROR "No Wi-Fi interface found"
@@ -111,18 +107,112 @@ detect_wifi_interface() {
     fi
 }
 
+configure_runtime_dir() {
+    install -d -m 0700 "$RUNTIME_DIR"
+}
+
+write_wpa_config() {
+    local config_file
+
+    config_file="$(wpa_config_file)"
+
+    {
+        printf 'ctrl_interface=/run/wpa_supplicant\n'
+        printf 'update_config=0\n'
+        if [[ -n "$WIFI_COUNTRY" ]]; then
+            printf 'country=%s\n' "$WIFI_COUNTRY"
+        fi
+        wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD"
+    } >"$config_file"
+
+    chmod 600 "$config_file"
+}
+
+set_networkmanager_unmanaged() {
+    if command -v nmcli >/dev/null 2>&1; then
+        nmcli device set "$WIFI_INTERFACE" managed no >/dev/null 2>&1 || true
+    fi
+}
+
+wpa_running() {
+    local pid_file
+    local pid
+
+    pid_file="$(wpa_pid_file)"
+
+    if [[ ! -f "$pid_file" ]]; then
+        return 1
+    fi
+
+    pid="$(<"$pid_file")"
+    [[ -n "$pid" ]] || return 1
+    kill -0 "$pid" >/dev/null 2>&1
+}
+
+stop_wpa_supplicant() {
+    local pid_file
+    local pid
+
+    pid_file="$(wpa_pid_file)"
+
+    if [[ -S "/run/wpa_supplicant/$WIFI_INTERFACE" ]]; then
+        wpa_cli -i "$WIFI_INTERFACE" terminate >/dev/null 2>&1 || true
+    fi
+
+    if [[ -f "$pid_file" ]]; then
+        pid="$(<"$pid_file")"
+        if [[ -n "$pid" ]]; then
+            kill "$pid" >/dev/null 2>&1 || true
+        fi
+        rm -f "$pid_file"
+    fi
+
+    ip addr flush dev "$WIFI_INTERFACE" scope global >/dev/null 2>&1 || true
+}
+
+start_wpa_supplicant() {
+    configure_runtime_dir
+    write_wpa_config
+    set_networkmanager_unmanaged
+
+    ip link set "$WIFI_INTERFACE" down >/dev/null 2>&1 || true
+    ip link set "$WIFI_INTERFACE" up
+    iw dev "$WIFI_INTERFACE" set power_save off >/dev/null 2>&1 || true
+
+    if wpa_running; then
+        return 0
+    fi
+
+    wpa_supplicant -B \
+        -i "$WIFI_INTERFACE" \
+        -c "$(wpa_config_file)" \
+        -P "$(wpa_pid_file)"
+}
+
 ################################################################################
 # Functions
 ################################################################################
 
+wpa_status_field() {
+    local field="$1"
+
+    wpa_cli -i "$WIFI_INTERFACE" status 2>/dev/null | awk -F= -v field="$field" '$1==field {print $2; exit}'
+}
+
+current_wpa_state() {
+    wpa_status_field wpa_state
+}
+
 get_current_ssid() {
-    LC_ALL=C nmcli -t -f ACTIVE,SSID device wifi list ifname "$WIFI_INTERFACE" \
-        | awk -F: '$1=="yes" {print $2; exit}'
+    wpa_status_field ssid
 }
 
 wifi_connected() {
-    local current_ssid="$1"
-    [[ "$current_ssid" == "$WIFI_SSID" ]]
+    [[ "$(current_wpa_state)" == "COMPLETED" ]] && [[ "$(get_current_ssid)" == "$WIFI_SSID" ]]
+}
+
+ensure_xtend_address() {
+    ip address replace "$XTEND_CLIENT_IP" dev "$WIFI_INTERFACE"
 }
 
 has_route_to_xtend() {
@@ -133,156 +223,48 @@ xtend_reachable() {
     ping -c 1 -W 2 -I "$WIFI_INTERFACE" "$XTEND_HOST" >/dev/null 2>&1
 }
 
-connection_profile_exists() {
-    local connection_name="$1"
+wait_for_wifi_connection() {
+    local tries=0
+    local max_tries=20
+    local state
 
-    nmcli -t -f NAME connection show | awk -F: -v name="$connection_name" '$1==name {found=1} END {exit(found?0:1)}'
-}
+    while (( tries < max_tries )); do
+        if wifi_connected; then
+            return 0
+        fi
 
-connection_profile_uuids() {
-    local connection_name="$1"
+        state="$(current_wpa_state)"
+        if [[ -n "$state" ]]; then
+            log DEBUG "wpa_state=$state"
+        fi
 
-    nmcli -t -f NAME,UUID connection show | awk -F: -v name="$connection_name" '$1==name {print $2}'
-}
-
-connection_profile_uuid() {
-    local connection_name="$1"
-    local matches
-
-    matches="$(connection_profile_uuids "$connection_name")"
-    awk 'NF {print; exit}' <<<"$matches"
-}
-
-ssid_profile_uuids() {
-    nmcli -t -f NAME,UUID connection show | awk -F: -v ssid="$WIFI_SSID" '
-        $1 == ssid || index($1, ssid " ") == 1 {print $2}
-    '
-}
-
-delete_connection_profiles() {
-    local connection_name="$1"
-    local deleted=0
-    local profile_uuid
-
-    while IFS= read -r profile_uuid; do
-        [[ -n "$profile_uuid" ]] || continue
-        nmcli connection delete uuid "$profile_uuid" >/dev/null 2>&1 || true
-        deleted=1
-    done < <(connection_profile_uuids "$connection_name")
-
-    return "$deleted"
-}
-
-delete_stale_ssid_profiles() {
-    local profile_uuid
-    local deleted=0
-
-    while IFS= read -r profile_uuid; do
-        [[ -n "$profile_uuid" ]] || continue
-        nmcli connection delete uuid "$profile_uuid" >/dev/null 2>&1 || true
-        deleted=1
-    done < <(ssid_profile_uuids)
-
-    return "$deleted"
-}
-
-activate_connection() {
-    local connection_name="$1"
-    local output
-
-    if output="$(nmcli --wait 20 connection up "$connection_name" ifname "$WIFI_INTERFACE" 2>&1)"; then
-        return 0
-    fi
-
-    if [[ -n "$output" ]]; then
-        while IFS= read -r line; do
-            [[ -n "$line" ]] || continue
-            log WARN "nmcli: $line"
-        done <<<"$output"
-    fi
+        ((tries += 1))
+        sleep 1
+    done
 
     return 1
-}
-
-ensure_wifi_profile() {
-    local connection_name="$1"
-    local existing_count=0
-    local profile_uuid
-
-    while IFS= read -r profile_uuid; do
-        [[ -n "$profile_uuid" ]] || continue
-        ((existing_count += 1))
-        if (( existing_count > 1 )); then
-            break
-        fi
-    done < <(connection_profile_uuids "$connection_name")
-
-    if (( existing_count > 1 )); then
-        log WARN "Found multiple NetworkManager profiles named '$connection_name'; recreating them"
-        delete_connection_profiles "$connection_name" || true
-        existing_count=0
-    fi
-
-    if connection_profile_exists "$connection_name"; then
-        profile_uuid="$(connection_profile_uuid "$connection_name")"
-        nmcli connection modify uuid "$profile_uuid" \
-            connection.id "$connection_name" \
-            connection.interface-name "$WIFI_INTERFACE" \
-            802-11-wireless.ssid "$WIFI_SSID" \
-            802-11-wireless-security.key-mgmt wpa-psk \
-            802-11-wireless-security.psk "$WIFI_PASSWORD" \
-            ipv4.method auto \
-            ipv6.method ignore >/dev/null
-        return 0
-    fi
-
-    nmcli connection add type wifi \
-        con-name "$connection_name" \
-        ifname "$WIFI_INTERFACE" \
-        ssid "$WIFI_SSID" \
-        wifi-sec.key-mgmt wpa-psk \
-        wifi-sec.psk "$WIFI_PASSWORD" \
-        ipv4.method auto \
-        ipv6.method ignore >/dev/null
-}
-
-recreate_wifi_profile() {
-    local connection_name="$1"
-
-    delete_connection_profiles "$connection_name" || true
-    delete_stale_ssid_profiles || true
-    ensure_wifi_profile "$connection_name"
 }
 
 connect_wifi() {
-    local connection_name
-
-    connection_name="$(xtend_connection_name)"
-
     log INFO "Attempting connection to '$WIFI_SSID' via '$WIFI_INTERFACE'"
 
-    nmcli device wifi rescan ifname "$WIFI_INTERFACE" >/dev/null 2>&1 || true
+    stop_wpa_supplicant
+    start_wpa_supplicant
 
-    if ensure_wifi_profile "$connection_name" \
-        && activate_connection "$connection_name"; then
-        log INFO "Connected using profile '$connection_name'"
-        return 0
+    if ! wait_for_wifi_connection; then
+        log WARN "wpa_supplicant did not reach COMPLETED state"
+        return 1
     fi
 
-    log WARN "Profile '$connection_name' failed; recreating it"
+    ensure_xtend_address
 
-    if recreate_wifi_profile "$connection_name" \
-        && activate_connection "$connection_name"; then
-        log INFO "Successfully connected to '$WIFI_SSID'"
-        return 0
+    if ! has_route_to_xtend || ! xtend_reachable; then
+        log WARN "Associated with '$WIFI_SSID' but '$XTEND_HOST' is unreachable"
+        return 1
     fi
 
-    log ERROR "Connection attempt failed"
-
-    log INFO "Available WiFi networks:"
-    nmcli --colors no device wifi list ifname "$WIFI_INTERFACE"
-
-    return 1
+    log INFO "Connected to '$WIFI_SSID'"
+    return 0
 }
 
 ################################################################################
@@ -291,16 +273,18 @@ connect_wifi() {
 
 log INFO "Starting wifi monitor"
 log INFO "Target SSID: '$WIFI_SSID'"
-wait_for_network_manager
 detect_wifi_interface
 log INFO "Wi-Fi interface: '$WIFI_INTERFACE'"
 log INFO "Xtend host: '$XTEND_HOST'"
+log INFO "Xtend client IP: '$XTEND_CLIENT_IP'"
+if [[ -n "$WIFI_COUNTRY" ]]; then
+    log INFO "Wi-Fi country: '$WIFI_COUNTRY'"
+fi
 log INFO "Check interval: ${CHECK_INTERVAL}s"
 
 LAST_STATE="unknown"
 
 while true; do
-
     CURRENT_SSID="$(get_current_ssid || true)"
 
     if [[ -n "$CURRENT_SSID" ]]; then
@@ -309,7 +293,8 @@ while true; do
         log WARN "No active WiFi connection detected"
     fi
 
-    if wifi_connected "$CURRENT_SSID"; then
+    if wifi_connected; then
+        ensure_xtend_address
 
         if ! has_route_to_xtend || ! xtend_reachable; then
             log WARN "Connected to '$WIFI_SSID' but '$XTEND_HOST' is unreachable; reconnecting"
@@ -323,9 +308,7 @@ while true; do
             log INFO "Connected to '$WIFI_SSID'"
             LAST_STATE="connected"
         fi
-
     else
-
         if [[ "$LAST_STATE" != "disconnected" ]]; then
             log WARN "Disconnected from '$WIFI_SSID'"
             LAST_STATE="disconnected"
@@ -335,5 +318,4 @@ while true; do
     fi
 
     sleep "$CHECK_INTERVAL"
-
 done
