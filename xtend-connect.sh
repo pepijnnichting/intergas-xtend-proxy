@@ -139,11 +139,56 @@ connection_profile_exists() {
     nmcli -t -f NAME connection show | awk -F: -v name="$connection_name" '$1==name {found=1} END {exit(found?0:1)}'
 }
 
-ensure_wifi_profile() {
+connection_profile_uuids() {
     local connection_name="$1"
 
+    nmcli -t -f NAME,UUID connection show | awk -F: -v name="$connection_name" '$1==name {print $2}'
+}
+
+connection_profile_uuid() {
+    local connection_name="$1"
+    local matches
+
+    matches="$(connection_profile_uuids "$connection_name")"
+    awk 'NF {print; exit}' <<<"$matches"
+}
+
+delete_connection_profiles() {
+    local connection_name="$1"
+    local deleted=0
+    local profile_uuid
+
+    while IFS= read -r profile_uuid; do
+        [[ -n "$profile_uuid" ]] || continue
+        nmcli connection delete uuid "$profile_uuid" >/dev/null 2>&1 || true
+        deleted=1
+    done < <(connection_profile_uuids "$connection_name")
+
+    return "$deleted"
+}
+
+ensure_wifi_profile() {
+    local connection_name="$1"
+    local existing_count=0
+    local profile_uuid
+
+    while IFS= read -r profile_uuid; do
+        [[ -n "$profile_uuid" ]] || continue
+        ((existing_count += 1))
+        if (( existing_count > 1 )); then
+            break
+        fi
+    done < <(connection_profile_uuids "$connection_name")
+
+    if (( existing_count > 1 )); then
+        log WARN "Found multiple NetworkManager profiles named '$connection_name'; recreating them"
+        delete_connection_profiles "$connection_name" || true
+        existing_count=0
+    fi
+
     if connection_profile_exists "$connection_name"; then
-        nmcli connection modify "$connection_name" \
+        profile_uuid="$(connection_profile_uuid "$connection_name")"
+        nmcli connection modify uuid "$profile_uuid" \
             connection.id "$connection_name" \
             connection.interface-name "$WIFI_INTERFACE" \
             802-11-wireless.ssid "$WIFI_SSID" \
@@ -167,7 +212,7 @@ ensure_wifi_profile() {
 recreate_wifi_profile() {
     local connection_name="$1"
 
-    nmcli connection delete "$connection_name" >/dev/null 2>&1 || true
+    delete_connection_profiles "$connection_name" || true
     ensure_wifi_profile "$connection_name"
 }
 
