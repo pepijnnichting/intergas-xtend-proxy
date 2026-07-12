@@ -118,8 +118,10 @@ configure_runtime_dir() {
 
 write_wpa_config() {
     local config_file
+    local hashed_network
 
     config_file="$(wpa_config_file)"
+    hashed_network="$(wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD")"
 
     {
         printf 'ctrl_interface=%s\n' "$RUNTIME_DIR"
@@ -127,7 +129,20 @@ write_wpa_config() {
         if [[ -n "$WIFI_COUNTRY" ]]; then
             printf 'country=%s\n' "$WIFI_COUNTRY"
         fi
-        wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD"
+        printf '%s\n' "$hashed_network" \
+            | awk '
+                /^\tnetwork=\{/ {
+                    print
+                    print "\tscan_ssid=1"
+                    print "\tkey_mgmt=WPA-PSK"
+                    print "\tproto=RSN WPA"
+                    print "\tpairwise=CCMP TKIP"
+                    print "\tgroup=CCMP TKIP"
+                    print "\tieee80211w=0"
+                    next
+                }
+                { print }
+            '
     } >"$config_file"
 
     chmod 600 "$config_file"
