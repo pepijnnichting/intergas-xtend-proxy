@@ -14,6 +14,7 @@ CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
 WIFI_INTERFACE="${WIFI_INTERFACE:-}"
 XTEND_HOST="${XTEND_HOST:-10.20.30.1}"
 
+
 ################################################################################
 # Helpers
 ################################################################################
@@ -68,6 +69,10 @@ require_command nmcli
 require_command awk
 require_command ip
 require_command ping
+
+xtend_connection_name() {
+    printf 'intergas-xtend-%s' "$WIFI_INTERFACE"
+}
 
 ################################################################################
 # Interface/network manager setup
@@ -128,19 +133,63 @@ xtend_reachable() {
     ping -c 1 -W 2 -I "$WIFI_INTERFACE" "$XTEND_HOST" >/dev/null 2>&1
 }
 
-connect_wifi() {
+connection_profile_exists() {
+    local connection_name="$1"
 
-    log INFO "Attempting connection to '$WIFI_SSID' via '$WIFI_INTERFACE'"
+    nmcli -t -f NAME connection show | awk -F: -v name="$connection_name" '$1==name {found=1} END {exit(found?0:1)}'
+}
 
-    # Prefer an existing connection profile when present.
-    if nmcli --wait 10 connection up "$WIFI_SSID" ifname "$WIFI_INTERFACE" >/dev/null 2>&1; then
-        log INFO "Connected using existing profile '$WIFI_SSID'"
+ensure_wifi_profile() {
+    local connection_name="$1"
+
+    if connection_profile_exists "$connection_name"; then
+        nmcli connection modify "$connection_name" \
+            connection.id "$connection_name" \
+            connection.interface-name "$WIFI_INTERFACE" \
+            802-11-wireless.ssid "$WIFI_SSID" \
+            802-11-wireless-security.key-mgmt wpa-psk \
+            802-11-wireless-security.psk "$WIFI_PASSWORD" \
+            ipv4.method auto \
+            ipv6.method ignore >/dev/null
         return 0
     fi
 
+    nmcli connection add type wifi \
+        con-name "$connection_name" \
+        ifname "$WIFI_INTERFACE" \
+        ssid "$WIFI_SSID" \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk "$WIFI_PASSWORD" \
+        ipv4.method auto \
+        ipv6.method ignore >/dev/null
+}
+
+recreate_wifi_profile() {
+    local connection_name="$1"
+
+    nmcli connection delete "$connection_name" >/dev/null 2>&1 || true
+    ensure_wifi_profile "$connection_name"
+}
+
+connect_wifi() {
+    local connection_name
+
+    connection_name="$(xtend_connection_name)"
+
+    log INFO "Attempting connection to '$WIFI_SSID' via '$WIFI_INTERFACE'"
+
     nmcli device wifi rescan ifname "$WIFI_INTERFACE" >/dev/null 2>&1 || true
 
-    if nmcli --wait 15 device wifi connect "$WIFI_SSID" password "$WIFI_PASSWORD" ifname "$WIFI_INTERFACE"; then
+    if ensure_wifi_profile "$connection_name" \
+        && nmcli --wait 20 connection up "$connection_name" ifname "$WIFI_INTERFACE" >/dev/null 2>&1; then
+        log INFO "Connected using profile '$connection_name'"
+        return 0
+    fi
+
+    log WARN "Profile '$connection_name' failed; recreating it"
+
+    if recreate_wifi_profile "$connection_name" \
+        && nmcli --wait 20 connection up "$connection_name" ifname "$WIFI_INTERFACE" >/dev/null 2>&1; then
         log INFO "Successfully connected to '$WIFI_SSID'"
         return 0
     fi

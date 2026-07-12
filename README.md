@@ -171,3 +171,20 @@ Als de proxy niet bereikbaar is:
 - Controleer firewall op de Pi (poort 8080 open op LAN).
 - Controleer of Pi wifi daadwerkelijk op Xtend SSID zit.
 - Controleer of `10.20.30.1` bereikbaar is vanaf de Pi.
+
+Als `journalctl -u xtend-connect.service -f` een fout toont zoals `802-11-wireless-security.key-mgmt: property is missing`:
+
+- Verwijder oude NetworkManager-profielen voor de Xtend eenmalig.
+- Herstart daarna de service zodat het script een nieuw profiel met expliciete WPA-PSK-instellingen aanmaakt.
+
+```sh
+sudo nmcli connection delete intergas-xtend-wlan0 2>/dev/null || true
+sudo nmcli connection delete "Xtend-2304102420" 2>/dev/null || true
+sudo systemctl restart xtend-connect.service
+```
+
+Controleer daarna opnieuw de logs:
+
+```sh
+journalctl -u xtend-connect.service -f
+```
