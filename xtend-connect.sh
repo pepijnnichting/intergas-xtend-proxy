@@ -1,341 +1,144 @@
 #!/usr/bin/env bash
+# Keep a dedicated Wi-Fi interface connected to an Intergas Xtend access point.
+# This script is intentionally self-contained: it is run by systemd as root.
 
 set -Eeuo pipefail
-#!/usr/bin/env bash
+IFS=$'\n\t'
 
-set -Eeuo pipefail
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/.env}"
+readonly RUNTIME_DIR="/run/intergas-xtend-proxy"
 
-################################################################################
-# Configuration
-################################################################################
+log() { local level="$1"; shift; printf '[%(%Y-%m-%d %H:%M:%S)T] [%s] %s\n' -1 "$level" "$*"; }
+die() { log ERROR "$*"; exit 1; }
+require_command() { command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"; }
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="$SCRIPT_DIR/.env"
-RUNTIME_DIR="/run/intergas-xtend-proxy"
-
-CHECK_INTERVAL="${CHECK_INTERVAL:-60}"
-WIFI_INTERFACE="${WIFI_INTERFACE:-}"
-WIFI_COUNTRY="${WIFI_COUNTRY:-}"
-XTEND_HOST="${XTEND_HOST:-10.20.30.1}"
-XTEND_CLIENT_IP="${XTEND_CLIENT_IP:-10.20.30.2/24}"
-
-################################################################################
-# Helpers
-################################################################################
-
-log() {
-    local level="$1"
-    shift
-
-    printf '[%s] [%s] %s\n' \
-        "$(date '+%Y-%m-%d %H:%M:%S')" \
-        "$level" \
-        "$*"
+is_ipv4() {
+    local ip="$1" octet
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    local -a octets
+    IFS=. read -r -a octets <<<"$ip"
+    for octet in "${octets[@]}"; do ((10#$octet <= 255)) || return 1; done
 }
 
-cleanup() {
-    stop_wpa_supplicant || true
-    log INFO "Stopping wifi monitor"
+validate_config() {
+    [[ -n "$WIFI_SSID" && ${#WIFI_SSID} -le 32 ]] || die "WIFI_SSID must be 1–32 characters"
+    [[ "$WIFI_PASSWORD" =~ ^.{8,63}$ ]] || die "WIFI_PASSWORD must be 8–63 characters"
+    [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] && ((CHECK_INTERVAL >= 5)) || die "CHECK_INTERVAL must be a number >= 5"
+    [[ -z "$WIFI_INTERFACE" || "$WIFI_INTERFACE" =~ ^[[:alnum:]_.:-]+$ ]] || die "WIFI_INTERFACE contains invalid characters"
+    [[ -z "$WIFI_COUNTRY" || "$WIFI_COUNTRY" =~ ^[A-Za-z]{2}$ ]] || die "WIFI_COUNTRY must be a two-letter country code"
+    is_ipv4 "$XTEND_HOST" || die "XTEND_HOST must be an IPv4 address"
+    local client_ip prefix
+    [[ "$XTEND_CLIENT_IP" =~ ^([^/]+)/([0-9]{1,2})$ ]] || die "XTEND_CLIENT_IP must be IPv4 CIDR notation"
+    client_ip="${BASH_REMATCH[1]}"; prefix="${BASH_REMATCH[2]}"
+    is_ipv4 "$client_ip" && ((10#$prefix <= 32)) || die "XTEND_CLIENT_IP must be IPv4 CIDR notation"
 }
 
-trap cleanup EXIT INT TERM
-
-require_command() {
-    local cmd="$1"
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        log ERROR "Required command not found: $cmd"
-        exit 1
-    fi
+# Read a simple KEY=value file without executing it. Wi-Fi passwords containing
+# shell metacharacters therefore remain data, not code.
+load_config() {
+    [[ -r "$CONFIG_FILE" ]] || die "Configuration file not readable: $CONFIG_FILE"
+    local line key value line_number=0
+    declare -A values=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((line_number += 1)); line="${line%$'\r'}"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$line" == *=* ]] || die "Invalid configuration at line $line_number (expected KEY=value)"
+        key="${line%%=*}"; value="${line#*=}"
+        [[ "$key" =~ ^(WIFI_SSID|WIFI_PASSWORD|WIFI_INTERFACE|WIFI_COUNTRY|CHECK_INTERVAL|XTEND_HOST|XTEND_CLIENT_IP)$ ]] || die "Unknown configuration key '$key' at line $line_number"
+        [[ -z "${values[$key]+x}" ]] || die "Duplicate configuration key '$key'"
+        values[$key]="$value"
+    done <"$CONFIG_FILE"
+    WIFI_SSID="${values[WIFI_SSID]:-}"; WIFI_PASSWORD="${values[WIFI_PASSWORD]:-}"
+    WIFI_INTERFACE="${values[WIFI_INTERFACE]:-}"; WIFI_COUNTRY="${values[WIFI_COUNTRY]:-}"
+    CHECK_INTERVAL="${values[CHECK_INTERVAL]:-60}"; XTEND_HOST="${values[XTEND_HOST]:-10.20.30.1}"
+    XTEND_CLIENT_IP="${values[XTEND_CLIENT_IP]:-10.20.30.2/24}"
+    validate_config
 }
 
-wpa_config_file() {
-    printf '%s/wpa_supplicant-%s.conf' "$RUNTIME_DIR" "$WIFI_INTERFACE"
-}
-
-wpa_pid_file() {
-    printf '%s/wpa_supplicant-%s.pid' "$RUNTIME_DIR" "$WIFI_INTERFACE"
-}
-
-wpa_ctrl_socket() {
-    printf '%s/%s' "$RUNTIME_DIR" "$WIFI_INTERFACE"
-}
-
-################################################################################
-# Load environment
-################################################################################
-
-if [[ ! -f "$ENV_FILE" ]]; then
-    log ERROR ".env file not found: $ENV_FILE"
-    exit 1
-fi
-
-set -a
-# shellcheck disable=SC1090
-source "$ENV_FILE"
-set +a
-
-: "${WIFI_SSID:?WIFI_SSID is required in .env}"
-: "${WIFI_PASSWORD:?WIFI_PASSWORD is required in .env}"
-
-if [[ ! "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$CHECK_INTERVAL" -lt 5 ]]; then
-    log ERROR "CHECK_INTERVAL must be a number >= 5"
-    exit 1
-fi
-
-require_command awk
-require_command ip
-require_command iw
-require_command ping
-require_command wpa_cli
-require_command wpa_passphrase
-require_command wpa_supplicant
-
-################################################################################
-# Interface/wpa_supplicant setup
-################################################################################
+wpa_config_file() { printf '%s/wpa_supplicant-%s.conf' "$RUNTIME_DIR" "$WIFI_INTERFACE"; }
+wpa_pid_file() { printf '%s/wpa_supplicant-%s.pid' "$RUNTIME_DIR" "$WIFI_INTERFACE"; }
+wpa_ctrl_socket() { printf '%s/%s' "$RUNTIME_DIR" "$WIFI_INTERFACE"; }
 
 detect_wifi_interface() {
     if [[ -n "$WIFI_INTERFACE" ]]; then
-        if ! iw dev "$WIFI_INTERFACE" info >/dev/null 2>&1; then
-            log ERROR "Configured WIFI_INTERFACE '$WIFI_INTERFACE' is not a known Wi-Fi device"
-            return 1
-        fi
-        return 0
+        iw dev "$WIFI_INTERFACE" info >/dev/null 2>&1 || die "Configured WIFI_INTERFACE '$WIFI_INTERFACE' is not a Wi-Fi device"
+        return
     fi
-
-    WIFI_INTERFACE="$(iw dev | awk '$1=="Interface" {print $2; exit}')"
-
-    if [[ -z "$WIFI_INTERFACE" ]]; then
-        log ERROR "No Wi-Fi interface found"
-        return 1
-    fi
+    WIFI_INTERFACE="$(iw dev | awk '$1 == "Interface" { print $2; exit }')"
+    [[ -n "$WIFI_INTERFACE" ]] || die "No Wi-Fi interface found; set WIFI_INTERFACE explicitly"
 }
 
-configure_runtime_dir() {
-    mkdir -p "$RUNTIME_DIR"
-    chmod 700 "$RUNTIME_DIR"
-}
+configure_runtime_dir() { install -d -m 0700 "$RUNTIME_DIR"; }
 
 write_wpa_config() {
-    local config_file
-    local hashed_network
-
-    config_file="$(wpa_config_file)"
-    hashed_network="$(wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD")"
-
+    local config_file temporary_file
+    config_file="$(wpa_config_file)"; temporary_file="$(mktemp "$RUNTIME_DIR/.wpa.XXXXXX")"
+    trap 'rm -f "$temporary_file"' RETURN
     {
-        printf 'ctrl_interface=%s\n' "$RUNTIME_DIR"
-        printf 'update_config=0\n'
-        if [[ -n "$WIFI_COUNTRY" ]]; then
-            printf 'country=%s\n' "$WIFI_COUNTRY"
-        fi
-        printf '%s\n' "$hashed_network" \
-            | awk '
-                /^\tnetwork=\{/ {
-                    print
-                    print "\tscan_ssid=1"
-                    print "\tkey_mgmt=WPA-PSK"
-                    print "\tproto=RSN WPA"
-                    print "\tpairwise=CCMP TKIP"
-                    print "\tgroup=CCMP TKIP"
-                    print "\tieee80211w=0"
-                    next
-                }
-                { print }
-            '
-    } >"$config_file"
-
-    chmod 600 "$config_file"
+        printf 'ctrl_interface=%s\nupdate_config=0\n' "$RUNTIME_DIR"
+        [[ -z "$WIFI_COUNTRY" ]] || printf 'country=%s\n' "${WIFI_COUNTRY^^}"
+        # wpa_passphrase emits a commented clear-text psk; never persist that.
+        wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD" | awk '
+            /^network=\{/ { print; print "\tscan_ssid=1"; print "\tkey_mgmt=WPA-PSK"; print "\tproto=RSN WPA"; print "\tpairwise=CCMP TKIP"; print "\tgroup=CCMP TKIP"; next }
+            /^[[:space:]]*#psk=/ { next }
+            { print }
+        '
+    } >"$temporary_file"
+    chmod 600 "$temporary_file"; mv -f "$temporary_file" "$config_file"; trap - RETURN
 }
 
-set_networkmanager_unmanaged() {
-    if command -v nmcli >/dev/null 2>&1; then
-        nmcli device set "$WIFI_INTERFACE" managed no >/dev/null 2>&1 || true
-    fi
-}
-
+set_networkmanager_unmanaged() { command -v nmcli >/dev/null 2>&1 && nmcli device set "$WIFI_INTERFACE" managed no >/dev/null 2>&1 || true; }
 wpa_running() {
-    local pid_file
-    local pid
-
-    pid_file="$(wpa_pid_file)"
-
-    if [[ ! -f "$pid_file" ]]; then
-        return 1
-    fi
-
-    pid="$(<"$pid_file")"
-    [[ -n "$pid" ]] || return 1
-    kill -0 "$pid" >/dev/null 2>&1
+    local pid_file pid; pid_file="$(wpa_pid_file)"; [[ -f "$pid_file" ]] || return 1
+    pid="$(<"$pid_file")"; [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" >/dev/null 2>&1
 }
-
 stop_wpa_supplicant() {
-    local pid_file
-    local pid
-
-    pid_file="$(wpa_pid_file)"
-
-    if [[ -S "$(wpa_ctrl_socket)" ]]; then
-        wpa_cli -p "$RUNTIME_DIR" -i "$WIFI_INTERFACE" terminate >/dev/null 2>&1 || true
-    fi
-
-    if [[ -f "$pid_file" ]]; then
-        pid="$(<"$pid_file")"
-        if [[ -n "$pid" ]]; then
-            kill "$pid" >/dev/null 2>&1 || true
-        fi
-        rm -f "$pid_file"
-    fi
-
+    local pid_file pid; pid_file="$(wpa_pid_file)"
+    [[ ! -S "$(wpa_ctrl_socket)" ]] || wpa_cli -p "$RUNTIME_DIR" -i "$WIFI_INTERFACE" terminate >/dev/null 2>&1 || true
+    if [[ -f "$pid_file" ]]; then pid="$(<"$pid_file")"; [[ ! "$pid" =~ ^[0-9]+$ ]] || kill "$pid" >/dev/null 2>&1 || true; rm -f "$pid_file"; fi
     ip addr flush dev "$WIFI_INTERFACE" scope global >/dev/null 2>&1 || true
 }
-
 start_wpa_supplicant() {
-    configure_runtime_dir
-    write_wpa_config
-    set_networkmanager_unmanaged
-
-    ip link set "$WIFI_INTERFACE" down >/dev/null 2>&1 || true
-    ip link set "$WIFI_INTERFACE" up
+    configure_runtime_dir; wpa_running && return
+    write_wpa_config; set_networkmanager_unmanaged
+    ip link set "$WIFI_INTERFACE" down >/dev/null 2>&1 || true; ip link set "$WIFI_INTERFACE" up
     iw dev "$WIFI_INTERFACE" set power_save off >/dev/null 2>&1 || true
-
-    if wpa_running; then
-        return 0
-    fi
-
-    wpa_supplicant -B \
-        -i "$WIFI_INTERFACE" \
-        -c "$(wpa_config_file)" \
-        -P "$(wpa_pid_file)"
+    wpa_supplicant -B -i "$WIFI_INTERFACE" -c "$(wpa_config_file)" -P "$(wpa_pid_file)"
 }
 
-################################################################################
-# Functions
-################################################################################
-
-wpa_status_field() {
-    local field="$1"
-
-    wpa_cli -p "$RUNTIME_DIR" -i "$WIFI_INTERFACE" status 2>/dev/null | awk -F= -v field="$field" '$1==field {print $2; exit}'
-}
-
-current_wpa_state() {
-    wpa_status_field wpa_state
-}
-
-get_current_ssid() {
-    wpa_status_field ssid
-}
-
-wifi_connected() {
-    [[ "$(current_wpa_state)" == "COMPLETED" ]] && [[ "$(get_current_ssid)" == "$WIFI_SSID" ]]
-}
-
-ensure_xtend_address() {
-    ip address replace "$XTEND_CLIENT_IP" dev "$WIFI_INTERFACE"
-}
-
-has_route_to_xtend() {
-    ip route get "$XTEND_HOST" oif "$WIFI_INTERFACE" >/dev/null 2>&1
-}
-
-xtend_reachable() {
-    ping -c 1 -W 2 -I "$WIFI_INTERFACE" "$XTEND_HOST" >/dev/null 2>&1
-}
-
-wait_for_wifi_connection() {
-    local tries=0
-    local max_tries=20
-    local state
-
-    while (( tries < max_tries )); do
-        if wifi_connected; then
-            return 0
-        fi
-
-        state="$(current_wpa_state)"
-        if [[ -n "$state" ]]; then
-            log DEBUG "wpa_state=$state"
-        fi
-
-        ((tries += 1))
-        sleep 1
+wpa_status_field() { wpa_cli -p "$RUNTIME_DIR" -i "$WIFI_INTERFACE" status 2>/dev/null | awk -F= -v key="$1" '$1 == key { print substr($0, length(key) + 2); exit }'; }
+wifi_connected() { [[ "$(wpa_status_field wpa_state)" == COMPLETED && "$(wpa_status_field ssid)" == "$WIFI_SSID" ]]; }
+ensure_xtend_address() { ip address replace "$XTEND_CLIENT_IP" dev "$WIFI_INTERFACE"; }
+xtend_reachable() { ping -c 1 -W 2 -I "$WIFI_INTERFACE" "$XTEND_HOST" >/dev/null 2>&1; }
+connect_wifi() {
+    local attempt state; log INFO "Connecting '$WIFI_INTERFACE' to '$WIFI_SSID'"
+    stop_wpa_supplicant; start_wpa_supplicant
+    for ((attempt = 1; attempt <= 20; attempt++)); do
+        wifi_connected && { ensure_xtend_address; xtend_reachable && return 0; }
+        state="$(wpa_status_field wpa_state || true)"; log DEBUG "Connection attempt $attempt/20; wpa_state=${state:-unknown}"; sleep 1
     done
-
     return 1
 }
+cleanup() { [[ -z "${WIFI_INTERFACE:-}" ]] || stop_wpa_supplicant; log INFO "Wi-Fi monitor stopped"; }
+trap cleanup EXIT INT TERM
 
-connect_wifi() {
-    log INFO "Attempting connection to '$WIFI_SSID' via '$WIFI_INTERFACE'"
-
-    stop_wpa_supplicant
-    start_wpa_supplicant
-
-    if ! wait_for_wifi_connection; then
-        log WARN "wpa_supplicant did not reach COMPLETED state"
-        return 1
-    fi
-
-    ensure_xtend_address
-
-    if ! has_route_to_xtend || ! xtend_reachable; then
-        log WARN "Associated with '$WIFI_SSID' but '$XTEND_HOST' is unreachable"
-        return 1
-    fi
-
-    log INFO "Connected to '$WIFI_SSID'"
-    return 0
+main() {
+    local current_ssid last_state=unknown command
+    for command in awk ip iw ping wpa_cli wpa_passphrase wpa_supplicant install mktemp; do require_command "$command"; done
+    load_config; detect_wifi_interface
+    log INFO "Starting Wi-Fi monitor (interface=$WIFI_INTERFACE, Xtend=$XTEND_HOST, interval=${CHECK_INTERVAL}s)"
+    while true; do
+        current_ssid="$(wpa_status_field ssid || true)"
+        if wifi_connected; then
+            ensure_xtend_address
+            if xtend_reachable; then [[ "$last_state" == connected ]] || log INFO "Connected to '$WIFI_SSID'"; last_state=connected
+            else log WARN "Xtend is unreachable while connected; reconnecting"; last_state=disconnected; connect_wifi || log WARN "Connection attempt failed; retrying later"; fi
+        else
+            [[ "$last_state" == disconnected ]] || log WARN "Not connected to '$WIFI_SSID' (current: ${current_ssid:-none})"
+            last_state=disconnected; connect_wifi || log WARN "Connection attempt failed; retrying later"
+        fi
+        sleep "$CHECK_INTERVAL"
+    done
 }
-
-################################################################################
-# Main loop
-################################################################################
-
-log INFO "Starting wifi monitor"
-log INFO "Target SSID: '$WIFI_SSID'"
-detect_wifi_interface
-log INFO "Wi-Fi interface: '$WIFI_INTERFACE'"
-log INFO "Xtend host: '$XTEND_HOST'"
-log INFO "Xtend client IP: '$XTEND_CLIENT_IP'"
-if [[ -n "$WIFI_COUNTRY" ]]; then
-    log INFO "Wi-Fi country: '$WIFI_COUNTRY'"
-fi
-log INFO "Check interval: ${CHECK_INTERVAL}s"
-
-LAST_STATE="unknown"
-
-while true; do
-    CURRENT_SSID="$(get_current_ssid || true)"
-
-    if [[ -n "$CURRENT_SSID" ]]; then
-        log DEBUG "Current SSID: '$CURRENT_SSID'"
-    else
-        log WARN "No active WiFi connection detected"
-    fi
-
-    if wifi_connected; then
-        ensure_xtend_address
-
-        if ! has_route_to_xtend || ! xtend_reachable; then
-            log WARN "Connected to '$WIFI_SSID' but '$XTEND_HOST' is unreachable; reconnecting"
-            LAST_STATE="disconnected"
-            connect_wifi || true
-            sleep "$CHECK_INTERVAL"
-            continue
-        fi
-
-        if [[ "$LAST_STATE" != "connected" ]]; then
-            log INFO "Connected to '$WIFI_SSID'"
-            LAST_STATE="connected"
-        fi
-    else
-        if [[ "$LAST_STATE" != "disconnected" ]]; then
-            log WARN "Disconnected from '$WIFI_SSID'"
-            LAST_STATE="disconnected"
-        fi
-
-        connect_wifi || true
-    fi
-
-    sleep "$CHECK_INTERVAL"
-done
+main "$@"

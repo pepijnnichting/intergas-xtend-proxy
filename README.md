@@ -1,200 +1,83 @@
 # Intergas Xtend Raspberry Pi Proxy
 
-Companion project voor de Intergas Xtend Home Assistant integratie:
-https://github.com/pepijnnichting/intergas-xtend
+Dit project laat een Raspberry Pi tegelijk verbinding houden met de Wi-Fi access
+point van een Intergas Xtend én de Xtend bereikbaar maken vanaf je thuisnetwerk.
+Home Assistant praat met de Pi op poort `8080`; de Pi proxy't vervolgens naar de
+Xtend op `10.20.30.1`.
 
-Deze map bevat een praktische bridge-opzet voor gebruik met Home Assistant:
+De Wi-Fi-interface wordt exclusief beheerd door `wpa_supplicant`. Gebruik voor
+de Pi dus bij voorkeur ethernet voor je normale thuisnetwerkverbinding.
 
-- De Raspberry Pi verbindt via wifi met de Intergas Xtend AP.
-- De Raspberry Pi is via ethernet verbonden met je thuisnetwerk.
-- Home Assistant praat met de Raspberry Pi (proxy), niet direct met de Xtend.
-- De wifi-link gebruikt direct `wpa_supplicant` met een vast adres op het Xtend subnet, dus geen `NetworkManager`-profielen of `nmcli` reconnect-logica.
+## Wat de installer doet
 
-Zo kun je in de Intergas Xtend-integratie het IP-adres van de Pi invullen.
+- installeert `nginx`, `wpasupplicant` en `iw`;
+- schrijft de configuratie met alleen root-leesrechten naar
+  `/opt/intergas-xtend-proxy/.env`;
+- installeert en start de Wi-Fi-monitor als systemd-service;
+- configureert nginx op poort `8080` zonder bestaande nginx-sites te verwijderen.
 
-## Bestanden
+## Installatie
 
-- `install.sh`: installeert alles automatisch (aanbevolen).
-- `xtend-connect.sh`: houdt de wifi-verbinding met de Xtend AP in stand via `wpa_supplicant`.
-- `xtend-connect.service`: systemd-service voor wifi auto-reconnect.
-- `xtend-proxy.nginx.conf`: nginx reverse proxy config.
-
-## Vereisten op de Pi
-
-- Raspberry Pi OS (of andere Linux met `systemd`)
-- sudo rechten
-
-## Snelle installatie (aanbevolen)
-
-Run op de Raspberry Pi in deze map:
+Kopieer deze repository naar de Raspberry Pi en voer uit:
 
 ```sh
-chmod +x install.sh
-sudo ./install.sh --ssid "Xtend_xxxxxxxxxx" --password "je_xtend_wachtwoord"
+sudo ./install.sh --ssid "Xtend_xxxxxxxxxx" --password "jouw_xtend_wachtwoord" --country NL
 ```
 
-Dit script doet automatisch:
+Bij een volgende installatie behoudt het script de huidige configuratie. Geef
+alleen `--force` mee wanneer je de opgeslagen waarden bewust wilt overschrijven.
 
-- Installeert `nginx`, `wpasupplicant` en `iw`
-- Kopieert bestanden naar `/opt/intergas-xtend-proxy`
-- Maakt `/opt/intergas-xtend-proxy/.env`
-- Installeert `xtend-connect.service`
-- Activeert nginx config en herlaadt nginx
-- Start en enabled `nginx` + `xtend-connect.service`
+Beschikbare opties:
 
-Optionele vlaggen:
+```text
+--interface wlan0         Kies de Wi-Fi-interface expliciet
+--country NL              Landcode; aanbevolen voor kanalen 12 en 13
+--check-interval 60       Controle-interval in seconden (minimaal 5)
+--client-ip 10.20.30.2/24 Vast adres van de Pi op het Xtend-netwerk
+--force                   Overschrijf de bestaande configuratie zonder vraag
+```
+
+Het Wi-Fi-wachtwoord moet een normale WPA/WPA2-passphrase van 8–63 tekens zijn.
+Gebruik geen aanhalingstekens of shell-escaping in de waarden: de installer
+slaat precies de opgegeven tekst op.
+
+## Home Assistant
+
+Gebruik in de Intergas Xtend-integratie:
+
+- Host: het LAN-IP-adres van de Raspberry Pi
+- Poort: `8080`
+
+Test vanaf een apparaat op je LAN:
 
 ```sh
-sudo ./install.sh --ssid "Xtend_xxxxxxxxxx" --password "..." --country NL --check-interval 60 --force
-```
-
-## Handmatige installatie
-
-Als je liever handmatig doet:
-
-Installeer de vereiste pakketten:
-
-```sh
-sudo apt update
-sudo apt install -y nginx wpasupplicant iw
-```
-
-Plaats de config:
-
-```sh
-sudo cp /opt/intergas-xtend-proxy/xtend-proxy.nginx.conf /etc/nginx/sites-available/xtend-proxy
-sudo ln -sf /etc/nginx/sites-available/xtend-proxy /etc/nginx/sites-enabled/xtend-proxy
-sudo rm -f /etc/nginx/sites-enabled/default
-```
-
-Controleer en herstart nginx:
-
-```sh
-sudo nginx -t
-sudo systemctl enable --now nginx
-sudo systemctl reload nginx
-```
-
-Hiermee luistert de proxy op poort `8080` en forwardt zowel de API als de webinterface naar `10.20.30.1:80`.
-
-## 1. Plaats de bestanden op de Pi
-
-Voorbeeldlocatie:
-
-```sh
-sudo mkdir -p /opt/intergas-xtend-proxy
-sudo cp install.sh xtend-connect.sh xtend-connect.service xtend-proxy.nginx.conf /opt/intergas-xtend-proxy/
-sudo chown -R pi:pi /opt/intergas-xtend-proxy
-cd /opt/intergas-xtend-proxy
-chmod +x install.sh xtend-connect.sh
-```
-
-## 2. Maak `.env` aan
-
-Maak `/opt/intergas-xtend-proxy/.env`:
-
-```dotenv
-# Wifi van de Xtend AP
-WIFI_SSID=Xtend_xxxxxxxxxx
-WIFI_PASSWORD=je_xtend_wachtwoord
-
-# Optioneel: forceer wifi interface (bijv. wlan0)
-# WIFI_INTERFACE=wlan0
-
-# Optioneel maar aanbevolen als de Xtend op kanaal 12/13 zit (bijv. Nederland)
-# WIFI_COUNTRY=NL
-
-# Optioneel: Xtend host (default 10.20.30.1)
-# XTEND_HOST=10.20.30.1
-
-# Vast IP van de Pi aan de Xtend-kant
-# XTEND_CLIENT_IP=10.20.30.2/24
-
-# Optioneel voor connect-script
-CHECK_INTERVAL=60
-```
-
-De Pi gebruikt standaard `10.20.30.2/24` op `wlan0` zodra de verbinding met de Xtend actief is. Daarmee is geen DHCP-client of NetworkManager-profiel nodig.
-
-## 3. Installeer alleen de wifi-service
-
-Kopieer unit files:
-
-```sh
-sudo cp /opt/intergas-xtend-proxy/xtend-connect.service /etc/systemd/system/
-```
-
-Pas eventueel `User=` en paden aan als je een andere locatie gebruikt.
-
-Herlaad systemd en start wifi auto-reconnect:
-
-```sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now xtend-connect.service
-```
-
-## 4. Controle
-
-Vind het LAN-IP van de Pi:
-
-```sh
-ip -4 addr show
-```
-
-Test vanaf je Home Assistant-machine of een andere host op je LAN:
-
-```sh
+curl http://<PI_IP>:8080/healthz
 curl "http://<PI_IP>:8080/api/stats/values?fields=79b3"
 ```
 
-Open de Xtend webinterface via de proxy:
+De webinterface van de Xtend is beschikbaar op `http://<PI_IP>:8080/`.
 
-```sh
-http://<PI_IP>:8080/
-```
+## Configuratie en onderhoud
 
-Health endpoint:
+De configuratie staat in `/opt/intergas-xtend-proxy/.env`. Het is een eenvoudig
+`KEY=value`-bestand. Ondersteunde sleutels zijn `WIFI_SSID`, `WIFI_PASSWORD`,
+`WIFI_INTERFACE`, `WIFI_COUNTRY`, `CHECK_INTERVAL`, `XTEND_HOST` en
+`XTEND_CLIENT_IP`. Opmerkingen beginnen met `#`; andere of dubbele sleutels
+worden bewust geweigerd zodat typefouten meteen zichtbaar zijn.
 
-```sh
-curl "http://<PI_IP>:8080/healthz"
-```
-
-## 5. Home Assistant integratie instellen
-
-In de Intergas Xtend-integratie:
-
-- Host: `<PI_IP>`
-- Poort: `8080`
-
-Daarna gaat Home Assistant via de Pi naar de Xtend.
-
-## Logs / troubleshooting
-
-```sh
-journalctl -u xtend-connect.service -f
-journalctl -u nginx -f
-```
-
-Als de proxy niet bereikbaar is:
-
-- Controleer firewall op de Pi (poort 8080 open op LAN).
-- Controleer of Pi wifi daadwerkelijk op Xtend SSID zit.
-- Controleer of `10.20.30.1` bereikbaar is vanaf de Pi.
-- Controleer of `wpa_supplicant` aanwezig is: `wpa_cli -v`
-
-Als je eerder de oude `NetworkManager`-variant gebruikte, kun je oude profielen veilig verwijderen of negeren. Deze nieuwe setup gebruikt ze niet meer.
-
-Als `journalctl -u xtend-connect.service -f` blijft melden dat geen verbinding tot stand komt:
-
-- Voeg `WIFI_COUNTRY=NL` toe aan `.env` als de Xtend op kanaal 12 of 13 uitzendt.
-- Herstart daarna de service.
+Na een handmatige wijziging:
 
 ```sh
 sudo systemctl restart xtend-connect.service
+sudo journalctl -u xtend-connect.service -f
 ```
 
-Controleer daarna opnieuw de logs:
+Controleer de complete status met:
 
 ```sh
-journalctl -u xtend-connect.service -f
+sudo systemctl status xtend-connect.service nginx
 ```
+
+Als de verbinding niet opkomt, controleer dan eerst of de interface bestaat
+(`iw dev`), stel zo nodig `WIFI_INTERFACE=wlan0` in en controleer de landcode.
+De service logt de exacte reden en probeert daarna automatisch opnieuw.

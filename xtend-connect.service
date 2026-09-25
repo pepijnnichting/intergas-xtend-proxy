@@ -1,7 +1,9 @@
 [Unit]
 Description=Xtend WiFi Auto Connect
-After=network-online.target
+After=network-online.target NetworkManager.service
 Wants=network-online.target
+StartLimitIntervalSec=5min
+StartLimitBurst=6
 
 [Service]
 Type=simple
@@ -15,6 +17,7 @@ WorkingDirectory=/opt/intergas-xtend-proxy
 
 Restart=always
 RestartSec=10
+TimeoutStopSec=15
 
 # Logging
 StandardOutput=journal
