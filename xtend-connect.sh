@@ -80,7 +80,10 @@ write_wpa_config() {
         [[ -z "$WIFI_COUNTRY" ]] || printf 'country=%s\n' "${WIFI_COUNTRY^^}"
         # wpa_passphrase emits a commented clear-text psk; never persist that.
         wpa_passphrase "$WIFI_SSID" "$WIFI_PASSWORD" | awk '
-            /^network=\{/ { print; print "\tscan_ssid=1"; print "\tkey_mgmt=WPA-PSK"; print "\tproto=RSN WPA"; print "\tpairwise=CCMP TKIP"; print "\tgroup=CCMP TKIP"; next }
+            # Let wpa_supplicant negotiate WPA2/cipher details advertised by the
+            # Xtend. Pinning those values makes some appliance access points
+            # reject the association before authentication can start.
+            /^network=\{/ { print; print "\tscan_ssid=1"; next }
             /^[[:space:]]*#psk=/ { next }
             { print }
         '
